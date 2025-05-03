@@ -42,6 +42,8 @@ jobs:
       - name: Create Sprint Issues
         uses: actions/github-script@v6
         with:
+          # IMPORTANT: For GitHub Actions, use PERSONAL_ACCESS_TOKEN with repo and project permissions
+          # For local testing with act, use GITHUB_TOKEN
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
@@ -123,9 +125,38 @@ jobs:
                   console.log(`Found ${subtaskItems.length} subtask items`);
                   
                   subtasks = subtaskItems.map((item, index) => {
-                    // Extract subtask name
-                    const subtaskNameMatch = item.match(/^\*\*([^*]+)\*\*/);
-                    const subtaskName = subtaskNameMatch ? subtaskNameMatch[1].trim() : `Subtask ${index+1}`;
+                    // Extract subtask name - improved regex to better match the format
+                    // First, check if this is the first subtask (index 0) with a special format
+                    let subtaskName;
+                    
+                    if (index === 0) {
+                      // For the first subtask, look for the pattern "1. **Name**" or just "**Name**"
+                      const firstSubtaskMatch = item.match(/^\d*\.*\s*\*\*([^*]+)\*\*/);
+                      if (firstSubtaskMatch) {
+                        subtaskName = firstSubtaskMatch[1].trim();
+                      }
+                    } else {
+                      // For other subtasks, use the original pattern
+                      const subtaskNameMatch = item.match(/^\*\*([^*]+)\*\*/);
+                      if (subtaskNameMatch) {
+                        subtaskName = subtaskNameMatch[1].trim();
+                      }
+                    }
+                    
+                    // If we still don't have a name, try other methods
+                    if (!subtaskName) {
+                      // Try to get the name from the first line before "Description"
+                      const firstLineMatch = item.match(/^([^*\n]+?)(?=\s+\*\*Description\*\*)/);
+                      if (firstLineMatch) {
+                        subtaskName = firstLineMatch[1].trim();
+                      } else {
+                        // Fallback to a generic name with index
+                        subtaskName = `Subtask ${index+1}`;
+                      }
+                    }
+                    
+                    // For debugging
+                    console.log(`Extracted subtask name: "${subtaskName}" from item: "${item.substring(0, 50)}..."`);
                     
                     // Extract subtask description
                     const subtaskDescMatch = item.match(/\*\*Description\*\*:\s+(.*?)(?=\s+\*\*Acceptance Criteria\*\*)/s);
@@ -275,6 +306,32 @@ jobs:
               // Process specified sprint or all sprints
               const sprintsToProcess = sprintNumber ? [sprintNumber] : ['1', '2', '3', '4', '5'];
               
+              // Get all existing issues first to avoid duplicates
+              console.log("Fetching all existing issues to prevent duplicates...");
+              const allExistingIssues = [];
+              let page = 1;
+              let hasMoreIssues = true;
+              
+              while (hasMoreIssues) {
+                const response = await octokit.rest.issues.listForRepo({
+                  owner,
+                  repo,
+                  state: 'all',
+                  per_page: 100,
+                  page: page
+                });
+                
+                if (response.data.length === 0) {
+                  hasMoreIssues = false;
+                } else {
+                  allExistingIssues.push(...response.data);
+                  page++;
+                  console.log(`Fetched ${response.data.length} issues (page ${page-1}), total: ${allExistingIssues.length}`);
+                }
+              }
+              
+              console.log(`Found ${allExistingIssues.length} total existing issues`);
+              
               for (const sprint of sprintsToProcess) {
                 const sprintTasks = extractSprintTasks(progressFile, sprint);
                 console.log(`Found ${sprintTasks.length} tasks for Sprint ${sprint}`);
@@ -296,20 +353,15 @@ jobs:
                 // Create issues for each task
                 for (const task of sprintTasks) {
                   try {
-                    // Check if issue already exists with this title
-                    const existingIssues = await octokit.rest.issues.listForRepo({
-                      owner,
-                      repo,
-                      state: 'all',
-                      per_page: 100
-                    });
+                    const issueTitle = `[Sprint ${sprint}] ${task.name}`;
                     
-                    const issueExists = existingIssues.data.some(issue => 
-                      issue.title === `[Sprint ${sprint}] ${task.name}`
+                    // Check if issue already exists with this title
+                    const issueExists = allExistingIssues.some(issue => 
+                      issue.title === issueTitle
                     );
                     
                     if (issueExists) {
-                      console.log(`Issue already exists: [Sprint ${sprint}] ${task.name}`);
+                      console.log(`Issue already exists: ${issueTitle}`);
                       continue;
                     }
                     
@@ -318,15 +370,16 @@ jobs:
                     issueBody += `## Description\n${task.description}\n\n`;
                     issueBody += `## Acceptance Criteria\n${task.acceptanceCriteria}\n\n`;
                     
-                    // Add subtasks if they exist
+                    // Add subtasks as a task list (checkboxes) if they exist
                     if (task.subtasks && task.subtasks.length > 0) {
                       issueBody += `## Subtasks\n\n`;
                       
                       for (let i = 0; i < task.subtasks.length; i++) {
                         const subtask = task.subtasks[i];
                         issueBody += `### ${i+1}. ${subtask.name}\n\n`;
-                        issueBody += `**Description**: ${subtask.description}\n\n`;
-                        issueBody += `**Acceptance Criteria**:\n${subtask.acceptanceCriteria}\n\n`;
+                        issueBody += `- [ ] **${subtask.name}**\n`;
+                        issueBody += `  **Description**: ${subtask.description}\n\n`;
+                        issueBody += `  **Acceptance Criteria**:\n${subtask.acceptanceCriteria.split('\n').map(line => `  ${line}`).join('\n')}\n\n`;
                       }
                     }
                     
@@ -336,12 +389,16 @@ jobs:
                     const newIssue = await octokit.rest.issues.create({
                       owner,
                       repo,
-                      title: `[Sprint ${sprint}] ${task.name}`,
+                      title: issueTitle,
                       body: issueBody,
                       labels: [`sprint-${sprint}`, 'automated']
                     });
                     
                     console.log(`Created issue #${newIssue.data.number}: ${newIssue.data.title}`);
+                    
+                    // Add the new issue to our list of existing issues to prevent duplicates
+                    // if the script runs multiple times in the same execution
+                    allExistingIssues.push(newIssue.data);
                     
                     // Add to project if needed
                     if (createProject && projectId) {
@@ -361,50 +418,6 @@ jobs:
                         console.log(`Added issue #${newIssue.data.number} to project ${projectName}`);
                       } catch (error) {
                         console.log(`Error adding issue to project: ${error.message}`);
-                      }
-                    }
-                    
-                    // If there are subtasks, create them as separate issues linked to the parent
-                    if (task.subtasks && task.subtasks.length > 0) {
-                      for (let i = 0; i < task.subtasks.length; i++) {
-                        const subtask = task.subtasks[i];
-                        
-                        // Create subtask issue
-                        const subtaskIssueBody = `# ${subtask.name}\n\n`;
-                        const subtaskBody = `${subtaskIssueBody}## Description\n${subtask.description}\n\n`;
-                        const subtaskWithCriteria = `${subtaskBody}## Acceptance Criteria\n${subtask.acceptanceCriteria}\n\n`;
-                        const fullSubtaskBody = `${subtaskWithCriteria}---\n\nSubtask for [#${newIssue.data.number}](${newIssue.data.html_url})\n\nAutomatically created from memory-bank/progress.md`;
-                        
-                        const newSubtaskIssue = await octokit.rest.issues.create({
-                          owner,
-                          repo,
-                          title: `[Sprint ${sprint}] ${task.name} - Subtask ${i+1}: ${subtask.name}`,
-                          body: fullSubtaskBody,
-                          labels: [`sprint-${sprint}`, 'automated', 'subtask']
-                        });
-                        
-                        console.log(`Created subtask issue #${newSubtaskIssue.data.number}: ${newSubtaskIssue.data.title}`);
-                        
-                        // Add to project if needed
-                        if (createProject && projectId) {
-                          try {
-                            await octokit.graphql(`
-                              mutation {
-                                addProjectV2ItemById(input: {
-                                  projectId: "${projectId}",
-                                  contentId: "${newSubtaskIssue.data.node_id}"
-                                }) {
-                                  item {
-                                    id
-                                  }
-                                }
-                              }
-                            `);
-                            console.log(`Added subtask issue #${newSubtaskIssue.data.number} to project ${projectName}`);
-                          } catch (error) {
-                            console.log(`Error adding subtask issue to project: ${error.message}`);
-                          }
-                        }
                       }
                     }
                   } catch (error) {
