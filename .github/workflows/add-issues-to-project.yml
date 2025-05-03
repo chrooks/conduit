@@ -29,35 +29,31 @@ jobs:
             
             console.log(`Processing issue #${issueNumber} (${issueNodeId})`);
             
-            // Project name
-            const projectName = 'Conduit App';
+            const projectNumber = 1;
+            console.log(`Attempting to access project #${projectNumber} for user ${owner}...`);
             
             try {
-              // First try to find the project in user's projects
-              console.log(`Looking for project "${projectName}" for user ${owner}...`);
-              
               let projectId = null;
               let statusFieldId = null;
               let backlogOptionId = null;
+              let projectTitle = null;
               
               try {
-                // Try user projects first
-                const userProjectQuery = await github.graphql(`
+                // Access project directly by number
+                const projectQuery = await github.graphql(`
                   query {
                     user(login: "${owner}") {
-                      projectsV2(first: 20) {
-                        nodes {
-                          id
-                          title
-                          fields(first: 20) {
-                            nodes {
-                              ... on ProjectV2SingleSelectField {
+                      projectV2(number: ${projectNumber}) {
+                        id
+                        title
+                        fields(first: 20) {
+                          nodes {
+                            ... on ProjectV2SingleSelectField {
+                              id
+                              name
+                              options {
                                 id
                                 name
-                                options {
-                                  id
-                                  name
-                                }
                               }
                             }
                           }
@@ -67,15 +63,14 @@ jobs:
                   }
                 `);
                 
-                const userProjects = userProjectQuery.user.projectsV2.nodes;
-                const existingUserProject = userProjects.find(p => p.title === projectName);
-                
-                if (existingUserProject) {
-                  projectId = existingUserProject.id;
-                  console.log(`Found existing user project: ${projectName} (${projectId})`);
+                const project = projectQuery.user.projectV2;
+                if (project) {
+                  projectId = project.id;
+                  projectTitle = project.title;
+                  console.log(`Found project by number: ${projectTitle} (${projectId})`);
                   
                   // Find the status field and backlog option
-                  const statusField = existingUserProject.fields.nodes.find(field => 
+                  const statusField = project.fields.nodes.find(field => 
                     field.name === 'Status' || field.name === 'status'
                   );
                   
@@ -94,29 +89,29 @@ jobs:
                   } else {
                     console.log(`No Status field found in project`);
                   }
+                } else {
+                  console.log(`Project #${projectNumber} not found for user ${owner}`);
                 }
-              } catch (userError) {
-                console.log(`Error with user project operations: ${userError.message}`);
-                console.log("Trying organization projects instead...");
+              } catch (error) {
+                console.log(`Error accessing project #${projectNumber}: ${error.message}`);
+                console.log("Trying to access project through viewer context...");
                 
-                // If user projects fail, try organization projects
+                // If direct access fails, try through the authenticated user's context
                 try {
-                  const orgProjectQuery = await github.graphql(`
+                  const viewerProjectQuery = await github.graphql(`
                     query {
-                      organization(login: "${owner}") {
-                        projectsV2(first: 20) {
-                          nodes {
-                            id
-                            title
-                            fields(first: 20) {
-                              nodes {
-                                ... on ProjectV2SingleSelectField {
+                      viewer {
+                        projectV2(number: ${projectNumber}) {
+                          id
+                          title
+                          fields(first: 20) {
+                            nodes {
+                              ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                options {
                                   id
                                   name
-                                  options {
-                                    id
-                                    name
-                                  }
                                 }
                               }
                             }
@@ -126,15 +121,14 @@ jobs:
                     }
                   `);
                   
-                  const orgProjects = orgProjectQuery.organization.projectsV2.nodes;
-                  const existingOrgProject = orgProjects.find(p => p.title === projectName);
-                  
-                  if (existingOrgProject) {
-                    projectId = existingOrgProject.id;
-                    console.log(`Found existing organization project: ${projectName} (${projectId})`);
+                  const project = viewerProjectQuery.viewer.projectV2;
+                  if (project) {
+                    projectId = project.id;
+                    projectTitle = project.title;
+                    console.log(`Found project through viewer context: ${projectTitle} (${projectId})`);
                     
                     // Find the status field and backlog option
-                    const statusField = existingOrgProject.fields.nodes.find(field => 
+                    const statusField = project.fields.nodes.find(field => 
                       field.name === 'Status' || field.name === 'status'
                     );
                     
@@ -153,14 +147,16 @@ jobs:
                     } else {
                       console.log(`No Status field found in project`);
                     }
+                  } else {
+                    console.log(`Project #${projectNumber} not found through viewer context`);
                   }
-                } catch (orgError) {
-                  console.log(`Error with organization project operations: ${orgError.message}`);
+                } catch (viewerError) {
+                  console.log(`Error accessing project through viewer context: ${viewerError.message}`);
                 }
               }
               
               if (!projectId) {
-                console.log(`Project "${projectName}" not found. Cannot add issue to project.`);
+                console.log(`Could not access project #${projectNumber}. Cannot add issue to project.`);
                 return;
               }
               
@@ -179,7 +175,7 @@ jobs:
               `);
               
               const itemId = addResponse.addProjectV2ItemById.item.id;
-              console.log(`Added issue #${issueNumber} to project ${projectName} (item ID: ${itemId})`);
+              console.log(`Added issue #${issueNumber} to project ${projectTitle} (item ID: ${itemId})`);
               
               // Set status to Backlog if we found the status field and backlog option
               if (statusFieldId && backlogOptionId) {
@@ -200,7 +196,7 @@ jobs:
                   }
                 `);
                 
-                console.log(`Set issue #${issueNumber} status to Backlog in project ${projectName}`);
+                console.log(`Set issue #${issueNumber} status to Backlog in project ${projectTitle}`);
               } else {
                 console.log(`Could not set status to Backlog: missing status field or backlog option`);
               }
