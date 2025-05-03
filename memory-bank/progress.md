@@ -76,7 +76,7 @@ As of May 3, 2025, we are in the initial planning and setup phase. The following
      - Linting and testing are automated
      - Build process is defined
      - Deployment strategy is established
-     - Pipeline documentation is created 
+     - Pipeline documentation is created
 
 #### Authentication System
 **Description**: Implement a secure user authentication and authorization system that supports email/password and OAuth providers.  
