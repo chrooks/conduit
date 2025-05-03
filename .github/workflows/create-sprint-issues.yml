@@ -1,0 +1,201 @@
+name: Create Sprint Issues
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      sprint_number:
+        description: 'Sprint number to process (1-5)'
+        required: true
+        default: '1'
+      create_project:
+        description: 'Create/update GitHub Project'
+        required: false
+        default: 'true'
+      project_name:
+        description: 'GitHub Project name'
+        required: false
+        default: 'Conduit MVP'
+  
+  # Optionally trigger when progress.md is updated
+  push:
+    paths:
+      - 'memory-bank/progress.md'
+    branches:
+      - main
+
+jobs:
+  create-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Install dependencies
+        run: npm install @actions/github @actions/core js-yaml
+
+      - name: Create Sprint Issues
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const core = require('@actions/core');
+            const github = require('@actions/github');
+            
+            // Get sprint number from input or default to processing all sprints
+            const sprintNumber = context.payload.inputs ? context.payload.inputs.sprint_number : null;
+            const createProject = context.payload.inputs ? context.payload.inputs.create_project === 'true' : true;
+            const projectName = context.payload.inputs ? context.payload.inputs.project_name : 'Conduit MVP';
+            
+            // Read progress.md file
+            const progressFile = fs.readFileSync('./memory-bank/progress.md', 'utf8');
+            
+            // Function to extract sprint tasks
+            function extractSprintTasks(content, sprintNum) {
+              const sprintRegex = new RegExp(`#### Sprint ${sprintNum}: [^\\n]+ \\([^\\)]+\\)\\s([\\s\\S]*?)(?=####|###|$)`, 'g');
+              const match = sprintRegex.exec(content);
+              
+              if (!match || !match[1]) {
+                return [];
+              }
+              
+              const taskLines = match[1].split('\n').filter(line => line.trim().startsWith('- ⬜'));
+              
+              return taskLines.map(line => {
+                // Extract task name (remove checkbox and whitespace)
+                return line.replace('- ⬜', '').trim();
+              });
+            }
+            
+            // Process sprints
+            async function processSprints() {
+              const octokit = github.getOctokit(process.env.GITHUB_TOKEN);
+              const { owner, repo } = context.repo;
+              
+              // Create or get project if needed
+              let projectId = null;
+              if (createProject) {
+                try {
+                  // Note: This uses the GraphQL API for Projects V2
+                  // You may need to adjust based on your GitHub version and plan
+                  const projectQuery = await octokit.graphql(`
+                    query {
+                      organization(login: "${owner}") {
+                        projectsV2(first: 20) {
+                          nodes {
+                            id
+                            title
+                          }
+                        }
+                      }
+                    }
+                  `);
+                  
+                  const projects = projectQuery.organization.projectsV2.nodes;
+                  const existingProject = projects.find(p => p.title === projectName);
+                  
+                  if (existingProject) {
+                    projectId = existingProject.id;
+                    console.log(`Found existing project: ${projectName} (${projectId})`);
+                  } else {
+                    // Create new project
+                    const newProject = await octokit.graphql(`
+                      mutation {
+                        createProjectV2(input: {ownerId: "${owner}", title: "${projectName}"}) {
+                          projectV2 {
+                            id
+                          }
+                        }
+                      }
+                    `);
+                    projectId = newProject.createProjectV2.projectV2.id;
+                    console.log(`Created new project: ${projectName} (${projectId})`);
+                  }
+                } catch (error) {
+                  console.log(`Error with project operations: ${error.message}`);
+                }
+              }
+              
+              // Process specified sprint or all sprints
+              const sprintsToProcess = sprintNumber ? [sprintNumber] : ['1', '2', '3', '4', '5'];
+              
+              for (const sprint of sprintsToProcess) {
+                const sprintTasks = extractSprintTasks(progressFile, sprint);
+                console.log(`Found ${sprintTasks.length} tasks for Sprint ${sprint}`);
+                
+                // Get sprint title
+                const sprintTitleRegex = new RegExp(`#### Sprint ${sprint}: ([^\\(]+)`, 'g');
+                const sprintTitleMatch = sprintTitleRegex.exec(progressFile);
+                const sprintTitle = sprintTitleMatch ? sprintTitleMatch[1].trim() : `Sprint ${sprint}`;
+                
+                // Get sprint dates
+                const sprintDatesRegex = new RegExp(`#### Sprint ${sprint}: [^\\(]+ \\(([^\\)]+)\\)`, 'g');
+                const sprintDatesMatch = sprintDatesRegex.exec(progressFile);
+                const sprintDates = sprintDatesMatch ? sprintDatesMatch[1].trim() : '';
+                
+                // Create issues for each task
+                for (const task of sprintTasks) {
+                  try {
+                    // Check if issue already exists with this title
+                    const existingIssues = await octokit.rest.issues.listForRepo({
+                      owner,
+                      repo,
+                      state: 'all',
+                      per_page: 100
+                    });
+                    
+                    const issueExists = existingIssues.data.some(issue => 
+                      issue.title === `[Sprint ${sprint}] ${task}`
+                    );
+                    
+                    if (issueExists) {
+                      console.log(`Issue already exists: [Sprint ${sprint}] ${task}`);
+                      continue;
+                    }
+                    
+                    // Create issue
+                    const newIssue = await octokit.rest.issues.create({
+                      owner,
+                      repo,
+                      title: `[Sprint ${sprint}] ${task}`,
+                      body: `Task from Sprint ${sprint}: ${sprintTitle} (${sprintDates})\n\nAutomatically created from memory-bank/progress.md`,
+                      labels: [`sprint-${sprint}`, 'automated']
+                    });
+                    
+                    console.log(`Created issue #${newIssue.data.number}: ${newIssue.data.title}`);
+                    
+                    // Add to project if needed
+                    if (createProject && projectId) {
+                      try {
+                        await octokit.graphql(`
+                          mutation {
+                            addProjectV2ItemById(input: {
+                              projectId: "${projectId}",
+                              contentId: "${newIssue.data.node_id}"
+                            }) {
+                              item {
+                                id
+                              }
+                            }
+                          }
+                        `);
+                        console.log(`Added issue #${newIssue.data.number} to project ${projectName}`);
+                      } catch (error) {
+                        console.log(`Error adding issue to project: ${error.message}`);
+                      }
+                    }
+                  } catch (error) {
+                    console.log(`Error creating issue: ${error.message}`);
+                  }
+                }
+              }
+            }
+            
+            // Run the process
+            await processSprints();
