@@ -1,0 +1,210 @@
+name: Add Issues to Project
+
+on:
+  issues:
+    types:
+      - opened
+
+# Permissions for the GITHUB_TOKEN
+permissions:
+  # Required for checking out the repository
+  contents: read
+  # Required for accessing issues
+  issues: read
+  # Required for creating/updating projects
+  repository-projects: write
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue to project
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = context.payload.issue.number;
+            const issueNodeId = context.payload.issue.node_id;
+            
+            console.log(`Processing issue #${issueNumber} (${issueNodeId})`);
+            
+            // Project name
+            const projectName = 'Conduit App';
+            
+            try {
+              // First try to find the project in user's projects
+              console.log(`Looking for project "${projectName}" for user ${owner}...`);
+              
+              let projectId = null;
+              let statusFieldId = null;
+              let backlogOptionId = null;
+              
+              try {
+                // Try user projects first
+                const userProjectQuery = await github.graphql(`
+                  query {
+                    user(login: "${owner}") {
+                      projectsV2(first: 20) {
+                        nodes {
+                          id
+                          title
+                          fields(first: 20) {
+                            nodes {
+                              ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                options {
+                                  id
+                                  name
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `);
+                
+                const userProjects = userProjectQuery.user.projectsV2.nodes;
+                const existingUserProject = userProjects.find(p => p.title === projectName);
+                
+                if (existingUserProject) {
+                  projectId = existingUserProject.id;
+                  console.log(`Found existing user project: ${projectName} (${projectId})`);
+                  
+                  // Find the status field and backlog option
+                  const statusField = existingUserProject.fields.nodes.find(field => 
+                    field.name === 'Status' || field.name === 'status'
+                  );
+                  
+                  if (statusField) {
+                    statusFieldId = statusField.id;
+                    const backlogOption = statusField.options.find(option => 
+                      option.name === 'Backlog' || option.name === 'backlog' || option.name === 'To Do' || option.name === 'Todo'
+                    );
+                    
+                    if (backlogOption) {
+                      backlogOptionId = backlogOption.id;
+                      console.log(`Found Status field (${statusFieldId}) and Backlog option (${backlogOptionId})`);
+                    } else {
+                      console.log(`Status field found but no Backlog option. Available options: ${statusField.options.map(o => o.name).join(', ')}`);
+                    }
+                  } else {
+                    console.log(`No Status field found in project`);
+                  }
+                }
+              } catch (userError) {
+                console.log(`Error with user project operations: ${userError.message}`);
+                console.log("Trying organization projects instead...");
+                
+                // If user projects fail, try organization projects
+                try {
+                  const orgProjectQuery = await github.graphql(`
+                    query {
+                      organization(login: "${owner}") {
+                        projectsV2(first: 20) {
+                          nodes {
+                            id
+                            title
+                            fields(first: 20) {
+                              nodes {
+                                ... on ProjectV2SingleSelectField {
+                                  id
+                                  name
+                                  options {
+                                    id
+                                    name
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  `);
+                  
+                  const orgProjects = orgProjectQuery.organization.projectsV2.nodes;
+                  const existingOrgProject = orgProjects.find(p => p.title === projectName);
+                  
+                  if (existingOrgProject) {
+                    projectId = existingOrgProject.id;
+                    console.log(`Found existing organization project: ${projectName} (${projectId})`);
+                    
+                    // Find the status field and backlog option
+                    const statusField = existingOrgProject.fields.nodes.find(field => 
+                      field.name === 'Status' || field.name === 'status'
+                    );
+                    
+                    if (statusField) {
+                      statusFieldId = statusField.id;
+                      const backlogOption = statusField.options.find(option => 
+                        option.name === 'Backlog' || option.name === 'backlog' || option.name === 'To Do' || option.name === 'Todo'
+                      );
+                      
+                      if (backlogOption) {
+                        backlogOptionId = backlogOption.id;
+                        console.log(`Found Status field (${statusFieldId}) and Backlog option (${backlogOptionId})`);
+                      } else {
+                        console.log(`Status field found but no Backlog option. Available options: ${statusField.options.map(o => o.name).join(', ')}`);
+                      }
+                    } else {
+                      console.log(`No Status field found in project`);
+                    }
+                  }
+                } catch (orgError) {
+                  console.log(`Error with organization project operations: ${orgError.message}`);
+                }
+              }
+              
+              if (!projectId) {
+                console.log(`Project "${projectName}" not found. Cannot add issue to project.`);
+                return;
+              }
+              
+              // Add issue to project
+              const addResponse = await github.graphql(`
+                mutation {
+                  addProjectV2ItemById(input: {
+                    projectId: "${projectId}",
+                    contentId: "${issueNodeId}"
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `);
+              
+              const itemId = addResponse.addProjectV2ItemById.item.id;
+              console.log(`Added issue #${issueNumber} to project ${projectName} (item ID: ${itemId})`);
+              
+              // Set status to Backlog if we found the status field and backlog option
+              if (statusFieldId && backlogOptionId) {
+                await github.graphql(`
+                  mutation {
+                    updateProjectV2ItemFieldValue(input: {
+                      projectId: "${projectId}",
+                      itemId: "${itemId}",
+                      fieldId: "${statusFieldId}",
+                      value: { 
+                        singleSelectOptionId: "${backlogOptionId}"
+                      }
+                    }) {
+                      projectV2Item {
+                        id
+                      }
+                    }
+                  }
+                `);
+                
+                console.log(`Set issue #${issueNumber} status to Backlog in project ${projectName}`);
+              } else {
+                console.log(`Could not set status to Backlog: missing status field or backlog option`);
+              }
+              
+            } catch (error) {
+              console.log(`Error processing issue: ${error.message}`);
+            }
