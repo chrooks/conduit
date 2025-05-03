@@ -15,7 +15,7 @@ on:
       project_name:
         description: 'GitHub Project name'
         required: false
-        default: 'Conduit MVP'
+        default: 'Conduit App'
   
   # Optionally trigger when progress.md is updated
   push:
@@ -34,7 +34,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '16'
+          node-version: '18'
 
       - name: Install dependencies
         run: npm install @actions/github @actions/core js-yaml
@@ -45,80 +45,230 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const core = require('@actions/core');
-            const github = require('@actions/github');
+            // core and github are already imported by the github-script action
+            // No need to require them again
             
             // Get sprint number from input or default to processing all sprints
             const sprintNumber = context.payload.inputs ? context.payload.inputs.sprint_number : null;
             const createProject = context.payload.inputs ? context.payload.inputs.create_project === 'true' : true;
-            const projectName = context.payload.inputs ? context.payload.inputs.project_name : 'Conduit MVP';
+            const projectName = context.payload.inputs ? context.payload.inputs.project_name : 'Conduit App';
             
             // Read progress.md file
             const progressFile = fs.readFileSync('./memory-bank/progress.md', 'utf8');
             
-            // Function to extract sprint tasks
+            // Debug: Log a portion of the file to verify content
+            console.log("Progress.md file content preview (first 500 chars):");
+            console.log(progressFile.substring(0, 500) + "...");
+            
+            // Function to extract sprint tasks with descriptions and acceptance criteria
             function extractSprintTasks(content, sprintNum) {
-              const sprintRegex = new RegExp(`#### Sprint ${sprintNum}: [^\\n]+ \\([^\\)]+\\)\\s([\\s\\S]*?)(?=####|###|$)`, 'g');
-              const match = sprintRegex.exec(content);
+              console.log(`Extracting tasks for Sprint ${sprintNum}...`);
               
-              if (!match || !match[1]) {
+              // Find the sprint section - looking for ### Sprint X: header
+              const sprintHeaderRegex = new RegExp(`### Sprint ${sprintNum}: [^\\n]+`, 'g');
+              const sprintHeaderMatch = sprintHeaderRegex.exec(content);
+              
+              if (!sprintHeaderMatch) {
+                console.log(`No header found for Sprint ${sprintNum}`);
                 return [];
               }
               
-              const taskLines = match[1].split('\n').filter(line => line.trim().startsWith('- ⬜'));
+              const sprintHeaderPos = sprintHeaderMatch.index;
+              console.log(`Found header for Sprint ${sprintNum} at position ${sprintHeaderPos}`);
               
-              return taskLines.map(line => {
-                // Extract task name (remove checkbox and whitespace)
-                return line.replace('- ⬜', '').trim();
+              // Find the next sprint header or section header to determine the end of this sprint section
+              const nextHeaderRegex = /### Sprint \d+:|### Post-MVP Features|## Current Status Details/g;
+              nextHeaderRegex.lastIndex = sprintHeaderPos + sprintHeaderMatch[0].length;
+              const nextHeaderMatch = nextHeaderRegex.exec(content);
+              
+              const sprintEndPos = nextHeaderMatch ? nextHeaderMatch.index : content.length;
+              const sprintSection = content.substring(sprintHeaderPos, sprintEndPos);
+              
+              console.log(`Extracted Sprint ${sprintNum} section, length: ${sprintSection.length} characters`);
+              console.log(`Sprint section preview: ${sprintSection.substring(0, 200)}...`);
+              
+              // Extract task sections - each task has a #### header
+              const taskSections = sprintSection.split(/#### /).slice(1);
+              console.log(`Found ${taskSections.length} potential task sections`);
+              
+              if (taskSections.length === 0) {
+                console.log(`No task sections found in Sprint ${sprintNum}`);
+                return [];
+              }
+              
+              return taskSections.map(section => {
+                // Extract task name (first line)
+                const taskNameMatch = section.match(/^([^\n]+)/);
+                const taskName = taskNameMatch ? taskNameMatch[1].trim() : `Unknown Task in Sprint ${sprintNum}`;
+                console.log(`Processing task: ${taskName}`);
+                
+                // Extract description
+                const descriptionMatch = section.match(/\*\*Description\*\*:\s+(.*?)(?=\s+\*\*Acceptance Criteria\*\*)/s);
+                const description = descriptionMatch ? descriptionMatch[1].trim() : '';
+                
+                // Extract acceptance criteria
+                const criteriaMatch = section.match(/\*\*Acceptance Criteria\*\*:\s+([\s\S]*?)(?=\s+\*\*Subtasks\*\*|\n\n#### |\n\n### |\n\n## |$)/);
+                const acceptanceCriteria = criteriaMatch ? criteriaMatch[1].trim() : '';
+                
+                // Extract subtasks if they exist
+                const subtasksMatch = section.match(/\*\*Subtasks\*\*:\s+([\s\S]*?)(?=\n\n#### |\n\n### |\n\n## |$)/);
+                const subtasksContent = subtasksMatch ? subtasksMatch[1].trim() : '';
+                
+                let subtasks = [];
+                if (subtasksContent) {
+                  console.log(`Found subtasks content for ${taskName}, length: ${subtasksContent.length} characters`);
+                  
+                  // Split by numbered items (1., 2., etc.)
+                  const subtaskItems = subtasksContent.split(/\n\d+\.\s+/).filter(Boolean);
+                  console.log(`Found ${subtaskItems.length} subtask items`);
+                  
+                  subtasks = subtaskItems.map((item, index) => {
+                    // Extract subtask name
+                    const subtaskNameMatch = item.match(/^\*\*([^*]+)\*\*/);
+                    const subtaskName = subtaskNameMatch ? subtaskNameMatch[1].trim() : `Subtask ${index+1}`;
+                    
+                    // Extract subtask description
+                    const subtaskDescMatch = item.match(/\*\*Description\*\*:\s+(.*?)(?=\s+\*\*Acceptance Criteria\*\*)/s);
+                    const subtaskDesc = subtaskDescMatch ? subtaskDescMatch[1].trim() : '';
+                    
+                    // Extract subtask acceptance criteria
+                    const subtaskCriteriaMatch = item.match(/\*\*Acceptance Criteria\*\*:\s+([\s\S]*?)$/);
+                    const subtaskCriteria = subtaskCriteriaMatch ? subtaskCriteriaMatch[1].trim() : '';
+                    
+                    return {
+                      name: subtaskName,
+                      description: subtaskDesc,
+                      acceptanceCriteria: subtaskCriteria
+                    };
+                  });
+                }
+                
+                return {
+                  name: taskName,
+                  description,
+                  acceptanceCriteria,
+                  subtasks
+                };
               });
             }
             
             // Process sprints
             async function processSprints() {
-              const octokit = github.getOctokit(process.env.GITHUB_TOKEN);
+              // In github-script, we use the pre-authenticated octokit client
+              const octokit = github;
               const { owner, repo } = context.repo;
+              
+              console.log(`Repository: ${owner}/${repo}`);
               
               // Create or get project if needed
               let projectId = null;
               if (createProject) {
                 try {
-                  // Note: This uses the GraphQL API for Projects V2
-                  // You may need to adjust based on your GitHub version and plan
-                  const projectQuery = await octokit.graphql(`
-                    query {
-                      organization(login: "${owner}") {
-                        projectsV2(first: 20) {
-                          nodes {
-                            id
-                            title
-                          }
-                        }
-                      }
-                    }
-                  `);
+                  // First try to get user's projects
+                  console.log(`Looking for projects for user ${owner}...`);
                   
-                  const projects = projectQuery.organization.projectsV2.nodes;
-                  const existingProject = projects.find(p => p.title === projectName);
-                  
-                  if (existingProject) {
-                    projectId = existingProject.id;
-                    console.log(`Found existing project: ${projectName} (${projectId})`);
-                  } else {
-                    // Create new project
-                    const newProject = await octokit.graphql(`
-                      mutation {
-                        createProjectV2(input: {ownerId: "${owner}", title: "${projectName}"}) {
-                          projectV2 {
-                            id
+                  try {
+                    // Try user projects first
+                    const userProjectQuery = await octokit.graphql(`
+                      query {
+                        user(login: "${owner}") {
+                          projectsV2(first: 20) {
+                            nodes {
+                              id
+                              title
+                            }
                           }
                         }
                       }
                     `);
-                    projectId = newProject.createProjectV2.projectV2.id;
-                    console.log(`Created new project: ${projectName} (${projectId})`);
+                    
+                    const userProjects = userProjectQuery.user.projectsV2.nodes;
+                    const existingUserProject = userProjects.find(p => p.title === projectName);
+                    
+                    if (existingUserProject) {
+                      projectId = existingUserProject.id;
+                      console.log(`Found existing user project: ${projectName} (${projectId})`);
+                    } else {
+                      // Create new project for user
+                      const userIdQuery = await octokit.graphql(`
+                        query {
+                          user(login: "${owner}") {
+                            id
+                          }
+                        }
+                      `);
+                      
+                      const userId = userIdQuery.user.id;
+                      
+                      const newProject = await octokit.graphql(`
+                        mutation {
+                          createProjectV2(input: {ownerId: "${userId}", title: "${projectName}"}) {
+                            projectV2 {
+                              id
+                            }
+                          }
+                        }
+                      `);
+                      projectId = newProject.createProjectV2.projectV2.id;
+                      console.log(`Created new user project: ${projectName} (${projectId})`);
+                    }
+                  } catch (userError) {
+                    console.log(`Error with user project operations: ${userError.message}`);
+                    console.log("Trying organization projects instead...");
+                    
+                    // If user projects fail, try organization projects
+                    try {
+                      const orgProjectQuery = await octokit.graphql(`
+                        query {
+                          organization(login: "${owner}") {
+                            projectsV2(first: 20) {
+                              nodes {
+                                id
+                                title
+                              }
+                            }
+                          }
+                        }
+                      `);
+                      
+                      const orgProjects = orgProjectQuery.organization.projectsV2.nodes;
+                      const existingOrgProject = orgProjects.find(p => p.title === projectName);
+                      
+                      if (existingOrgProject) {
+                        projectId = existingOrgProject.id;
+                        console.log(`Found existing organization project: ${projectName} (${projectId})`);
+                      } else {
+                        // Create new project for organization
+                        const orgIdQuery = await octokit.graphql(`
+                          query {
+                            organization(login: "${owner}") {
+                              id
+                            }
+                          }
+                        `);
+                        
+                        const orgId = orgIdQuery.organization.id;
+                        
+                        const newProject = await octokit.graphql(`
+                          mutation {
+                            createProjectV2(input: {ownerId: "${orgId}", title: "${projectName}"}) {
+                              projectV2 {
+                                id
+                              }
+                            }
+                          }
+                        `);
+                        projectId = newProject.createProjectV2.projectV2.id;
+                        console.log(`Created new organization project: ${projectName} (${projectId})`);
+                      }
+                    } catch (orgError) {
+                      console.log(`Error with organization project operations: ${orgError.message}`);
+                      console.log("Unable to create or find project. Continuing without project assignment.");
+                    }
                   }
                 } catch (error) {
                   console.log(`Error with project operations: ${error.message}`);
+                  console.log("Continuing without project assignment.");
                 }
               }
               
@@ -129,13 +279,17 @@ jobs:
                 const sprintTasks = extractSprintTasks(progressFile, sprint);
                 console.log(`Found ${sprintTasks.length} tasks for Sprint ${sprint}`);
                 
+                if (sprintTasks.length === 0) {
+                  continue;
+                }
+                
                 // Get sprint title
-                const sprintTitleRegex = new RegExp(`#### Sprint ${sprint}: ([^\\(]+)`, 'g');
+                const sprintTitleRegex = new RegExp(`### Sprint ${sprint}: ([^\\(]+)`, 'g');
                 const sprintTitleMatch = sprintTitleRegex.exec(progressFile);
                 const sprintTitle = sprintTitleMatch ? sprintTitleMatch[1].trim() : `Sprint ${sprint}`;
                 
                 // Get sprint dates
-                const sprintDatesRegex = new RegExp(`#### Sprint ${sprint}: [^\\(]+ \\(([^\\)]+)\\)`, 'g');
+                const sprintDatesRegex = new RegExp(`### Sprint ${sprint}: [^\\(]+ \\(([^\\)]+)\\)`, 'g');
                 const sprintDatesMatch = sprintDatesRegex.exec(progressFile);
                 const sprintDates = sprintDatesMatch ? sprintDatesMatch[1].trim() : '';
                 
@@ -151,20 +305,39 @@ jobs:
                     });
                     
                     const issueExists = existingIssues.data.some(issue => 
-                      issue.title === `[Sprint ${sprint}] ${task}`
+                      issue.title === `[Sprint ${sprint}] ${task.name}`
                     );
                     
                     if (issueExists) {
-                      console.log(`Issue already exists: [Sprint ${sprint}] ${task}`);
+                      console.log(`Issue already exists: [Sprint ${sprint}] ${task.name}`);
                       continue;
                     }
+                    
+                    // Format issue body with description, acceptance criteria, and subtasks
+                    let issueBody = `# ${task.name}\n\n`;
+                    issueBody += `## Description\n${task.description}\n\n`;
+                    issueBody += `## Acceptance Criteria\n${task.acceptanceCriteria}\n\n`;
+                    
+                    // Add subtasks if they exist
+                    if (task.subtasks && task.subtasks.length > 0) {
+                      issueBody += `## Subtasks\n\n`;
+                      
+                      for (let i = 0; i < task.subtasks.length; i++) {
+                        const subtask = task.subtasks[i];
+                        issueBody += `### ${i+1}. ${subtask.name}\n\n`;
+                        issueBody += `**Description**: ${subtask.description}\n\n`;
+                        issueBody += `**Acceptance Criteria**:\n${subtask.acceptanceCriteria}\n\n`;
+                      }
+                    }
+                    
+                    issueBody += `---\n\nTask from Sprint ${sprint}: ${sprintTitle} (${sprintDates})\n\nAutomatically created from memory-bank/progress.md`;
                     
                     // Create issue
                     const newIssue = await octokit.rest.issues.create({
                       owner,
                       repo,
-                      title: `[Sprint ${sprint}] ${task}`,
-                      body: `Task from Sprint ${sprint}: ${sprintTitle} (${sprintDates})\n\nAutomatically created from memory-bank/progress.md`,
+                      title: `[Sprint ${sprint}] ${task.name}`,
+                      body: issueBody,
                       labels: [`sprint-${sprint}`, 'automated']
                     });
                     
@@ -188,6 +361,50 @@ jobs:
                         console.log(`Added issue #${newIssue.data.number} to project ${projectName}`);
                       } catch (error) {
                         console.log(`Error adding issue to project: ${error.message}`);
+                      }
+                    }
+                    
+                    // If there are subtasks, create them as separate issues linked to the parent
+                    if (task.subtasks && task.subtasks.length > 0) {
+                      for (let i = 0; i < task.subtasks.length; i++) {
+                        const subtask = task.subtasks[i];
+                        
+                        // Create subtask issue
+                        const subtaskIssueBody = `# ${subtask.name}\n\n`;
+                        const subtaskBody = `${subtaskIssueBody}## Description\n${subtask.description}\n\n`;
+                        const subtaskWithCriteria = `${subtaskBody}## Acceptance Criteria\n${subtask.acceptanceCriteria}\n\n`;
+                        const fullSubtaskBody = `${subtaskWithCriteria}---\n\nSubtask for [#${newIssue.data.number}](${newIssue.data.html_url})\n\nAutomatically created from memory-bank/progress.md`;
+                        
+                        const newSubtaskIssue = await octokit.rest.issues.create({
+                          owner,
+                          repo,
+                          title: `[Sprint ${sprint}] ${task.name} - Subtask ${i+1}: ${subtask.name}`,
+                          body: fullSubtaskBody,
+                          labels: [`sprint-${sprint}`, 'automated', 'subtask']
+                        });
+                        
+                        console.log(`Created subtask issue #${newSubtaskIssue.data.number}: ${newSubtaskIssue.data.title}`);
+                        
+                        // Add to project if needed
+                        if (createProject && projectId) {
+                          try {
+                            await octokit.graphql(`
+                              mutation {
+                                addProjectV2ItemById(input: {
+                                  projectId: "${projectId}",
+                                  contentId: "${newSubtaskIssue.data.node_id}"
+                                }) {
+                                  item {
+                                    id
+                                  }
+                                }
+                              }
+                            `);
+                            console.log(`Added subtask issue #${newSubtaskIssue.data.number} to project ${projectName}`);
+                          } catch (error) {
+                            console.log(`Error adding subtask issue to project: ${error.message}`);
+                          }
+                        }
                       }
                     }
                   } catch (error) {

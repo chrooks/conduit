@@ -19,10 +19,11 @@ This project uses GitHub Issues to track tasks from sprint plans. A GitHub Actio
 
 ### How to Use the GitHub Actions Workflow
 
-The workflow can be triggered in two ways:
+The workflow can be triggered in three ways:
 
 1. **Automatically**: When changes are pushed to `memory-bank/progress.md` on the main branch
 2. **Manually**: Through the GitHub Actions UI
+3. **Locally**: Using the `act` tool
 
 #### Manual Trigger
 
