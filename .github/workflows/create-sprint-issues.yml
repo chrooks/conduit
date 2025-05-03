@@ -24,6 +24,15 @@ on:
     branches:
       - main
 
+# Permissions for the GITHUB_TOKEN
+permissions:
+  # Required for checking out the repository
+  contents: read
+  # Required for creating issues
+  issues: write
+  # Required for creating/updating projects
+  repository-projects: write
+
 jobs:
   create-issues:
     runs-on: ubuntu-latest
@@ -42,8 +51,7 @@ jobs:
       - name: Create Sprint Issues
         uses: actions/github-script@v6
         with:
-          # IMPORTANT: For GitHub Actions, use PERSONAL_ACCESS_TOKEN with repo and project permissions
-          # For local testing with act, use GITHUB_TOKEN
+          # Use GITHUB_TOKEN with explicitly defined permissions
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
